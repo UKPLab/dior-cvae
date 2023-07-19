@@ -93,6 +93,28 @@ def get_args():
     parser.add_argument("--end_layer", default=None, type=int,
                         help="The end layer to consider the latent vector, default as the last layer of model")
     parser.add_argument("--bart", action='store_true', default=False)
+    parser.add_argument('--diffusion_prior', '-diffusion_prior', action='store_true', default=False,
+              help="Whether use the denoising diffusion model to build the prior distribution")
+    parser.add_argument('--sde_type', '-sde_type', type=str, choices=['geometric_sde', 'vpsde', 'sub_vpsde', 'vesde'],
+              default='vpsde')
+    parser.add_argument('--beta_end', '-beta_end', type=float, default=20.0)
+    parser.add_argument('--beta_start', '-beta_start', type=float, default=0.1)
+    parser.add_argument('--sigma2_0', '-sigma2_0', type=float, default=0.0)
+    parser.add_argument('--time_eps', '-time_eps', type=float, default=0.01)
+
+    parser.add_argument('--diffusion_steps', '-diffusion_step', type=int, default=50)
+    parser.add_argument('--learn_sigma', '-learn_sigma', action='store_true', default=True)
+    parser.add_argument('--sigma_small', '-sigma_small', action='store_true', default=False)
+    parser.add_argument('--noise_schedule', '-noise_schedule', choices=['cosine', 'linear'], default='linear')
+    parser.add_argument('--use_kl', '-use_kl', action='store_true', default=False)
+    parser.add_argument('--use_ddim', '-use_ddim', action='store_true', default=False)
+    parser.add_argument('--clip_denoised', '-clip_denoised', action='store_true', default=True)
+    parser.add_argument('--w', '-w', type=float, default=0.1)
+    parser.add_argument('--predict_xstart', '-predict_xstart', action='store_true', default=False)
+    parser.add_argument('--rescale_timesteps', '-rescale_timesteps', action='store_true', default=True)
+    parser.add_argument('--rescale_learned_sigmas', '-rescale_learned_sigmas', action='store_true', default=True)
+    parser.add_argument('--timestep_respacing', '-timestep_respacing', type=str, default='')
+    parser.add_argument('--schedule_sampler', '-schedule_sampler', choices=['uniform', 'loss-second-moment'], default='uniform')
     args = parser.parse_args()
     return args
 
@@ -314,7 +336,7 @@ def prepare_model(args):
         tokenizer._add_tokens(['</s>'])
     if not args.bart:
         tokenizer.pad_id = 50256
-    tokenizer._add_tokens(['[CLS]'])
+    # tokenizer._add_tokens(['[CLS]'])
     tokenizer._add_tokens(['[SEP]'])
     
     if not args.bart:
@@ -329,6 +351,26 @@ def prepare_model(args):
     model_config.use_bow = args.use_bow
     model_config.begin_layer = args.begin_layer
     model_config.end_layer = args.end_layer
+    if args.diffusion_prior:
+        model_config.diffusion_prior = args.diffusion_prior
+        model_config.sde_type = args.sde_type
+        model_config.beta_end = args.beta_end
+        model_config.beta_start = args.beta_start
+        model_config.sigma2_0 = args.sigma2_0
+        model_config.time_eps = args.time_eps
+        model_config.diffusion_steps = args.diffusion_steps
+        model_config.learn_sigma = args.learn_sigma
+        model_config.sigma_small = args.sigma_small
+        model_config.noise_schedule = args.noise_schedule
+        model_config.use_kl = args.use_kl
+        model_config.use_ddim = args.use_ddim
+        model_config.clip_denoised = args.clip_denoised
+        model_config.w = args.w
+        model_config.predict_xstart = args.predict_xstart
+        model_config.rescale_timesteps = args.rescale_timesteps
+        model_config.rescale_learned_sigmas = args.rescale_learned_sigmas
+        model_config.timestep_respacing = args.timestep_respacing
+        model_config.schedule_sampler = args.schedule_sampler
 
     for arg in vars(args):
         if arg.startswith('latent'):

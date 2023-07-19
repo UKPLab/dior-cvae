@@ -45,6 +45,12 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.models.bart.configuration_bart import BartConfig
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
+from diffusion.diff_net import Diffusion_Net
+from diffusion.diffusion_continuous import make_diffusion
+from util import utils
+import functools
+from improved_diffusion.script_util import create_gaussian_diffusion
+from improved_diffusion.resample import create_named_schedule_sampler
 
 from dist import Normal
 from modeloutput import EncoderOutput, DecoderOutput
@@ -1339,6 +1345,28 @@ class BartVAEEncoder(BartPretrainedModel):
         self.reccurnt_cell_weight_ih = nn.ModuleList([nn.Linear(self.latent_size, self.latent_size) for _ in range(self.num_layers)])
         self.pooling = nn.ModuleList([AverageSelfAttention(config) for _ in range(len(self.layers))])
         self.tanh_activate = nn.Tanh()
+        self.diffusion_prior = False
+
+        if config.diffusion_prior:
+            self.diffusion_prior = True
+            self.diffusion = create_gaussian_diffusion(steps=config.diffusion_steps,
+                                                       learn_sigma=config.learn_sigma,
+                                                       sigma_small=config.sigma_small,
+                                                       noise_schedule=config.noise_schedule,
+                                                       use_kl=config.use_kl,
+                                                       predict_xstart=config.predict_xstart,
+                                                       rescale_timesteps=config.rescale_timesteps,
+                                                       rescale_learned_sigmas=config.rescale_learned_sigmas,
+                                                       timestep_respacing=config.timestep_respacing)
+            self.diff_predict_net = Diffusion_Net(config)
+            self.schedule_sampler = create_named_schedule_sampler(config.schedule_sampler, self.diffusion)
+            self.condition_state_transform = nn.Sequential(nn.Linear(self.num_layers * config.d_model,
+                                                                     self.num_layers * config.latent_size),
+                                                           nn.ReLU(), nn.Linear(self.num_layers * config.latent_size,
+                                                                                self.num_layers * config.latent_size))
+            self.w = config.w
+            self.use_ddim = config.use_ddim
+            self.clip_denoised = config.clip_denoised
 
         self.init_weights()
         self.gradient_checkpointing = False
@@ -1406,25 +1434,49 @@ class BartVAEEncoder(BartPretrainedModel):
             condition_hidden_states = condition_output.hidden_states
         else:
             condition_hidden_states = tuple([None] * self.num_layers)
-        prior_dist = Normal.get_standard(batch_size, self.latent_size, device)
-        prior_latent_representaion = torch.zeros(batch_size, self.latent_size).to(device)
-        prior_latent = torch.zeros_like(prior_latent_representaion)
-        all_prior_latent = ()
+        if not self.diffusion_prior:
+            prior_dist = Normal.get_standard(batch_size, self.latent_size, device)
+            prior_latent_representaion = torch.zeros(batch_size, self.latent_size).to(device)
+            prior_latent = torch.zeros_like(prior_latent_representaion)
+            all_prior_latent = ()
 
-        for idx in range(self.begin_layer, self.end_layer + 1):
-            cond = condition_hidden_states[idx - self.begin_layer]
-            prior_network = self.prior_network[idx - self.begin_layer]
-            weight_ih = self.reccurnt_cell_weight_ih[idx - self.begin_layer]
-            weight_hh = self.reccurnt_cell_weight_hh[idx - self.begin_layer]
-            prior_latent_representaion = self._recurrent_latent(prior_latent, prior_latent_representaion, weight_ih, weight_hh)
-            if cond is not None:
-                prior_representaion = torch.cat((prior_latent_representaion, cond), dim=-1)
-            else:
-                prior_representaion = prior_latent_representaion
-            prior_mu, prior_sigma = torch.chunk(prior_network(prior_representaion), 2, dim=-1)
-            prior_dist = Normal(prior_mu, prior_sigma)
-            prior_latent, _ = prior_dist.sample()
-            all_prior_latent = all_prior_latent + (prior_latent, )
+            for idx in range(self.begin_layer, self.end_layer + 1):
+                cond = condition_hidden_states[idx - self.begin_layer]
+                prior_network = self.prior_network[idx - self.begin_layer]
+                weight_ih = self.reccurnt_cell_weight_ih[idx - self.begin_layer]
+                weight_hh = self.reccurnt_cell_weight_hh[idx - self.begin_layer]
+                prior_latent_representaion = self._recurrent_latent(prior_latent, prior_latent_representaion, weight_ih, weight_hh)
+                if cond is not None:
+                    prior_representaion = torch.cat((prior_latent_representaion, cond), dim=-1)
+                else:
+                    prior_representaion = prior_latent_representaion
+                prior_mu, prior_sigma = torch.chunk(prior_network(prior_representaion), 2, dim=-1)
+                prior_dist = Normal(prior_mu, prior_sigma)
+                prior_latent, _ = prior_dist.sample()
+                all_prior_latent = all_prior_latent + (prior_latent, )
+        else:
+            cat_condition_state = self.condition_state_transform(
+                torch.flatten(torch.stack(condition_hidden_states).permute(1, 0, 2), start_dim=1, end_dim=-1))
+            model_kwargs = {}
+            model_kwargs["y"] = cat_condition_state
+            model_kwargs["w"] = self.w
+            sample_fn = (
+                self.diffusion.p_sample_loop if not self.use_ddim else self.diffusion.ddim_sample_loop
+            )
+            sample = sample_fn(
+                self.diff_predict_net,
+                (cat_condition_state.shape[0], cat_condition_state.shape[1]),
+                clip_denoised=self.clip_denoised,
+                model_kwargs=model_kwargs,
+            )
+            # sample = torch.randn_like(cat_condition_state).to(cat_condition_state.device)
+            all_prior_latent_list = list(
+                torch.chunk(sample.reshape(-1, len(self.layers), self.latent_size).permute(1, 0, 2),
+                            len(self.layers)))
+            all_prior_latent = ()
+            for i in range(len(all_prior_latent_list)):
+                all_prior_latent = all_prior_latent + (all_prior_latent_list[i].squeeze(0), )
+
         return all_prior_latent
 
     def forward(
@@ -1634,12 +1686,55 @@ class BartVAEEncoder(BartPretrainedModel):
             encoder_states = encoder_states + (hidden_states,)
 
         if compute_kl:
-            kl_loss = torch.stack(all_kl_loss).mean(0)
-            log_prior = torch.stack(all_log_prior).mean(0)
-            log_post = torch.stack(all_log_post).mean(0)
+            if not self.diffusion_prior:
+                kl_loss = torch.stack(all_kl_loss).mean(0)
+                log_prior = torch.stack(all_log_prior).mean(0)
+                log_post = torch.stack(all_log_post).mean(0)
 
-            mu = torch.cat(all_post_mu, dim=-1)
-            sigma = torch.cat(all_post_sigma, dim=-1)
+                mu = torch.cat(all_post_mu, dim=-1)
+                sigma = torch.cat(all_post_sigma, dim=-1)
+            else:
+                cat_post_latent = torch.flatten(torch.stack(all_post_latent).permute(1, 0, 2), start_dim=1, end_dim=-1)
+                cat_condition_state = self.condition_state_transform(
+                    torch.flatten(torch.stack(condition_hidden_states).permute(1, 0, 2), start_dim=1, end_dim=-1))
+                vae_neg_entropy = 0.0
+                for log_q_conv in all_log_post:
+                    vae_neg_entropy += torch.sum(log_q_conv, dim=-1)
+
+                micro_cond = {}
+                micro_cond['y'] = cat_condition_state
+                t, weights = self.schedule_sampler.sample(hidden_states.shape[0], hidden_states.device)
+                compute_losses = functools.partial(
+                    self.diffusion.training_losses,
+                    self.diff_predict_net,
+                    cat_post_latent,
+                    t,
+                    True,
+                    model_kwargs=micro_cond,
+                )
+                losses = compute_losses()
+                loss = losses['loss']
+                p_objective = torch.sum(weights * loss, dim=-1)
+                cross_entropy_per_var = weights.unsqueeze(-1) * loss.unsqueeze(-1)
+                cross_entropy_per_var = cross_entropy_per_var + self.diffusion.cross_entropy_const(
+                    torch.zeros_like(t, dtype=t.dtype, device=t.device), cat_post_latent)
+                cross_entropy = torch.sum(cross_entropy_per_var, dim=-1)
+                all_neg_log_p = list(torch.chunk(
+                    cross_entropy_per_var.reshape(-1, len(self.layers), self.latent_size).permute(1, 0, 2),
+                    len(self.layers)))
+                for i in range(len(all_neg_log_p)):
+                    all_neg_log_p[i] = all_neg_log_p[i].squeeze(0)
+                kl_all_list, kl_vals_per_group, kl_diag_list = utils.kl_per_group_vada(all_log_post, all_neg_log_p)
+                kl_coeff = 1.0
+                alpha_i = torch.ones([len(self.layers)], device=cat_condition_state.device)
+                balanced_kl, kl_coeffs, kl_vals = utils.kl_balancer(kl_all_list, kl_coeff, kl_balance=False,
+                                                                    alpha_i=alpha_i)
+                kl_loss = torch.sum(balanced_kl)
+                log_prior = torch.stack(all_log_prior).mean(0)
+                log_post = torch.stack(all_log_post).mean(0)
+
+                mu = torch.cat(all_post_mu, dim=-1)
+                sigma = torch.cat(all_post_sigma, dim=-1)
         else:
             kl_loss = None
             log_prior = None
