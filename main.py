@@ -69,7 +69,7 @@ def get_args():
                         help="Choose to use greedy decoding")
     parser.add_argument('--top_k', type=int, default=-1, help='Set top k')
     parser.add_argument('--top_p', type=float, default=0.9, help='Set top p')
-    parser.add_argument('--repetition_penalty', type=float, default=1.2)
+    parser.add_argument('--repetition_penalty', type=float, default=3.1)
     parser.add_argument('--model_parallel', action='store_true', 
                         help="Choose to use model parallel, mapping the layers to different devices")
     parser.add_argument('--eval', action='store_true', help='Choose to eval the model')
@@ -336,7 +336,7 @@ def prepare_model(args):
         tokenizer._add_tokens(['</s>'])
     if not args.bart:
         tokenizer.pad_id = 50256
-    # tokenizer._add_tokens(['[CLS]'])
+    tokenizer._add_tokens(['[CLS]'])
     tokenizer._add_tokens(['[SEP]'])
     
     if not args.bart:
@@ -344,6 +344,7 @@ def prepare_model(args):
         tokenizer.eos_id = tokenizer.convert_tokens_to_ids('</s>')
 
     model_config = AutoConfig.from_pretrained(args.pretrained_model)
+    # model_config.decoder_start_token_id = 0
     model_config.vocab_size = len(tokenizer)
     model_config.pad_token_id = tokenizer.pad_token_id
     model_config.kl_threshold = args.kl_threshold
@@ -351,8 +352,8 @@ def prepare_model(args):
     model_config.use_bow = args.use_bow
     model_config.begin_layer = args.begin_layer
     model_config.end_layer = args.end_layer
+    model_config.diffusion_prior = args.diffusion_prior
     if args.diffusion_prior:
-        model_config.diffusion_prior = args.diffusion_prior
         model_config.sde_type = args.sde_type
         model_config.beta_end = args.beta_end
         model_config.beta_start = args.beta_start

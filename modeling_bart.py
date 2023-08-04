@@ -1433,6 +1433,7 @@ class BartVAEEncoder(BartPretrainedModel):
             condition_output = self(condition, attention_mask=condition_mask, compute_kl=False)
             condition_hidden_states = condition_output.hidden_states
         else:
+            condition_output = None
             condition_hidden_states = tuple([None] * self.num_layers)
         if not self.diffusion_prior:
             prior_dist = Normal.get_standard(batch_size, self.latent_size, device)
@@ -1477,7 +1478,7 @@ class BartVAEEncoder(BartPretrainedModel):
             for i in range(len(all_prior_latent_list)):
                 all_prior_latent = all_prior_latent + (all_prior_latent_list[i].squeeze(0), )
 
-        return all_prior_latent
+        return all_prior_latent, condition_output
 
     def forward(
         self,

@@ -179,8 +179,9 @@ def generate(model, test_iter, tokenizer, args):
             input_ids = target[:, 0].unsqueeze(1)
             model_kwargs = {}
             if args.dataset_type == 'wp':
-                prior_latent = model.get_prior(batch_size, device, condition=inputs['condition'], condition_mask=inputs['condition_mask'])
+                prior_latent, encoder_outputs = model.get_prior(batch_size, device, condition=inputs['condition'], condition_mask=inputs['condition_mask'])
                 model_kwargs['attention_mask'] = inputs['condition_mask']
+                model_kwargs['encoder_outputs'] = encoder_outputs
                 input_ids = inputs['condition']
                 if args.bart:
                     model_kwargs['compute_kl'] = False
@@ -200,7 +201,7 @@ def generate(model, test_iter, tokenizer, args):
                     do_sample=True,
                     top_k=args.top_k, 
                     top_p=args.top_p, 
-                    min_length=input_ids.size(-1) + 3, 
+                    min_length=input_ids.size(-1) + 3 if not args.bart else 3,
                     max_length=min(args.max_length, 1024),
                     repetition_penalty=args.repetition_penalty, 
                     **model_kwargs,
@@ -212,7 +213,7 @@ def generate(model, test_iter, tokenizer, args):
                     bos_token_id=tokenizer.bos_id if not args.bart else tokenizer.bos_token_id,
                     eos_token_id=tokenizer.eos_id if not args.bart else tokenizer.eos_token_id,
                     pad_token_id=tokenizer.pad_id if not args.bart else tokenizer.pad_token_id,
-                    min_length=input_ids.size(-1) + 3, 
+                    min_length=input_ids.size(-1) + 3 if not args.bart else 3,
                     max_length=min(args.max_length, 1024),
                     repetition_penalty=args.repetition_penalty, 
                     **model_kwargs,
@@ -232,7 +233,7 @@ def generate(model, test_iter, tokenizer, args):
                     eos_token_id=tokenizer.eos_id if not args.bart else tokenizer.eos_token_id,
                     pad_token_id=tokenizer.pad_id if not args.bart else tokenizer.pad_token_id,
                     num_beams=args.num_beams, 
-                    min_length=input_ids.size(-1) + 3, 
+                    min_length=input_ids.size(-1) + 3 if not args.bart else 3,
                     max_length=min(args.max_length, 1024), 
                     repetition_penalty=args.repetition_penalty, 
                     **model_kwargs,
@@ -254,6 +255,8 @@ def generate(model, test_iter, tokenizer, args):
                         source_text = tokenizer.decode(source[i], clean_up_tokenization_spaces=False)
                         source_text = filter_sen(source_text)
                         source_list.append(source_text)
+                else:
+                    print('meet zero')
 
     save_dir = os.path.join(args.generation_output_dir, args.model_name)
     file_name = '{}_output_{}_epoch_{}_outputs.txt'.format(has_condition, generate_param, args.load_epoch)
