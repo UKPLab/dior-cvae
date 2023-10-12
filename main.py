@@ -34,6 +34,7 @@ def get_args():
                         help="Dataset type")
     parser.add_argument("--output_dir", default='./checkpoints', type=str,
                         help="The output directory where the model checkpoints and predictions will be written.")
+    parser.add_argument("--tensorboard_dir", default='./tensorboard', type=str)
     parser.add_argument("--model_name", default='della', type=str,
                         help="The model name")
     parser.add_argument("--generation_output_dir", default='./generation_output', type=str,
@@ -78,6 +79,7 @@ def get_args():
     parser.add_argument('--generation', action='store_true', help='Choose to generate')
     parser.add_argument('--use_scheduler', action='store_true',
                         help="Choose to use lr scheduler")
+    parser.add_argument('--warmup_steps', type=int, default=20000)
     parser.add_argument('--cycle_annealing', action='store_true',
                         help="Choose to use cycle annealing")
     parser.add_argument('--cycle_iters', type=int, default=2,
@@ -115,6 +117,8 @@ def get_args():
     parser.add_argument('--rescale_learned_sigmas', '-rescale_learned_sigmas', action='store_true', default=True)
     parser.add_argument('--timestep_respacing', '-timestep_respacing', type=str, default='')
     parser.add_argument('--schedule_sampler', '-schedule_sampler', choices=['uniform', 'loss-second-moment'], default='uniform')
+    parser.add_argument('--latent_dir', '-latent_dir', type=str, default='./visualization/latent_samples')
+    parser.add_argument('--visualize_prior', '-visualize_prior', action='store_true', default=False)
     args = parser.parse_args()
     return args
 
@@ -346,7 +350,7 @@ def prepare_model(args):
     model_config = AutoConfig.from_pretrained(args.pretrained_model)
     # model_config.decoder_start_token_id = 0
     model_config.vocab_size = len(tokenizer)
-    model_config.pad_token_id = tokenizer.pad_token_id
+    model_config.pad_token_id = tokenizer.pad_token_id if args.bart else tokenizer.pad_id
     model_config.kl_threshold = args.kl_threshold
     model_config.is_cvae = (args.dataset_type == 'wp')
     model_config.use_bow = args.use_bow
@@ -429,7 +433,7 @@ def main():
     if args.eval or args.generation:
         test_iter = prepare_data(tokenizer, args)
         if args.eval:
-            valid(model, test_iter, args.load_epoch, args)
+            valid(model, test_iter, args.load_epoch, args, tb_writer=None)
         if args.generation:
             generate(model, test_iter, tokenizer, args)
     else:

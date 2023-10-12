@@ -28,11 +28,11 @@ def calc_iwnll(model, iters, ns=30):
         seq_len = attention_mask.sum(-1).long()
         report_num_sents += input_ids.size(0)
         report_num_words += seq_len.sum().item()
-        kl_loss = model.get_klloss(input_ids, attention_mask)
+        kl_loss = model.get_klloss(**inputs)
         ll_tmp = []
         ce_tmp = []
         for _ in range(ns):
-            log_gen, log_likelihood = model.iw_sample(input_ids, attention_mask)
+            log_gen, log_likelihood = model.iw_sample(**inputs)
             ce_tmp.append(log_gen)
             ll_tmp.append(log_likelihood)
 

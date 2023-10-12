@@ -5,6 +5,7 @@ import torch.nn as nn
 import logging
 from tqdm import tqdm
 from train_utils import *
+from tensorboardX import SummaryWriter
 import pandas as pd
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ def compute_loss(logits, target_tokens, kl_loss=None, beta=None, ignore_index=50
 def train(model, train_iter, valid_iter, args):
     logging.info('begin trainging...')
     model, optimizer, scheduler = prepare_for_training(args, model, train_iter)
+    writer = SummaryWriter(os.path.join(args.tensorboard_dir, args.model_name))
     if args.cycle_annealing:
         beta = 1e-5
         beta_0 = 1e-5
@@ -51,10 +53,10 @@ def train(model, train_iter, valid_iter, args):
         for i, inputs in enumerate(train_iter):
             model_output = model.train_model(**inputs) if args.bart else model(**inputs)
             if args.use_bow:
-                ce_loss, kl_loss, bow_loss, _, _ = model_output
+                ce_loss, kl_loss, bow_loss, _, _, ppl = model_output
                 loss = ce_loss + beta * kl_loss + args.bow_weight * bow_loss
             else:
-                ce_loss, kl_loss, _, _ = model_output
+                ce_loss, kl_loss, _, _, ppl = model_output
                 loss = ce_loss + beta * kl_loss
                     
             if args.gradient_accumulation_steps > 1:
@@ -86,34 +88,43 @@ def train(model, train_iter, valid_iter, args):
                     logging.info('training loss: step [{}~{}], loss {}, ce_loss {}, kl_loss {}, bow_loss {}, lr {}, beta {}'.
                         format(global_step - args.log_step, global_step, running_loss / args.log_step, running_ce_loss / args.log_step, 
                                 running_kl_loss / args.log_step, running_bow_loss / args.log_step, optimizer.param_groups[0]['lr'], beta))
+                    writer.add_scalar('/train_loss', running_loss / args.log_step, global_step)
+                    writer.add_scalar('/train_ce_loss', running_ce_loss / args.log_step, global_step)
+                    writer.add_scalar('/train_kl_loss', running_kl_loss / args.log_step, global_step)
+                    writer.add_scalar('/train_bow_loss', running_bow_loss / args.log_step, global_step)
+                    writer.add_scalar('/lr', optimizer.param_groups[0]['lr'], global_step)
+                    writer.add_scalar('/beta', beta, global_step)
                     running_loss = 0
                     running_kl_loss = 0
                     running_ce_loss = 0
                     running_bow_loss = 0
-
-        valid(model, valid_iter, epoch, args, beta)
+        valid(model, valid_iter, epoch, args, writer, beta)
         save(model, args, epoch)
     logging.info('training finished')
 
-def valid(model, valid_iter, epoch, args, beta=1):
+def valid(model, valid_iter, epoch, args, tb_writer, beta=1):
     model.eval()
     with torch.no_grad():
         valid_loss = 0
         valid_kl_loss = 0
         valid_ce_loss = 0
         valid_bow_loss = 0
+        valid_ppl = 0
+        valid_ppl_list = []
         for inputs in tqdm(valid_iter, desc='valid epoch {}'.format(epoch)):
             model_output = model.train_model(**inputs) if args.bart else model(**inputs)
             if args.use_bow:
-                ce_loss, kl_loss, bow_loss, _, _ = model_output
+                ce_loss, kl_loss, bow_loss, _, _, ppl = model_output
                 loss = ce_loss + beta * kl_loss + args.bow_weight * bow_loss
             else:
-                ce_loss, kl_loss, _, _ = model_output
+                ce_loss, kl_loss, _, _, ppl = model_output
                 loss = ce_loss + beta * kl_loss
             loss = loss.mean()
             valid_loss += loss.item()
             valid_ce_loss += ce_loss.mean().item()
             valid_kl_loss += kl_loss.mean().item()
+            valid_ppl = valid_ppl + ppl
+            valid_ppl_list.append(ppl)
             if args.use_bow:
                 valid_bow_loss += bow_loss.mean().item()
         
@@ -121,13 +132,21 @@ def valid(model, valid_iter, epoch, args, beta=1):
         valid_ce_loss = valid_ce_loss / len(valid_iter)
         valid_kl_loss = valid_kl_loss / len(valid_iter)
         valid_bow_loss = valid_bow_loss / len(valid_iter)
-        logging.info('valid result: epoch {}, loss {}, ce_loss {}, kl {}, bow {}'.format(epoch, valid_loss, valid_ce_loss, valid_kl_loss, valid_bow_loss))
-        
+        valid_ppl = valid_ppl / len(valid_iter)
+        for p in valid_ppl_list:
+            print()
+        logging.info('valid result: epoch {}, loss {}, ce_loss {}, kl {}, bow {}, ppl {}'.format(epoch, valid_loss, valid_ce_loss, valid_kl_loss, valid_bow_loss, valid_ppl))
+        if tb_writer is not None:
+            tb_writer.add_scalar('/valid_loss', valid_loss, epoch)
+            tb_writer.add_scalar('/valid_ce_loss', valid_ce_loss, epoch)
+            tb_writer.add_scalar('/valid_kl_loss', valid_kl_loss, epoch)
+            tb_writer.add_scalar('/valid_bow_loss', valid_bow_loss, epoch)
+
         if args.eval_metrics:
             ppl, elbo, nll, kl = calc_iwnll(model, valid_iter, ns=args.sample_times)
-            au = calc_au(model, valid_iter)
+            #au = calc_au(model, valid_iter)
             logging.info('valid result: epoch {}, ppl {}, elbo {}, nll {}, kl {}'.format(epoch, ppl, elbo, nll, kl))
-            logging.info('valid result: epoch {}, au {}'.format(epoch, au))
+            #logging.info('valid result: epoch {}, au {}'.format(epoch, au))
 
 def save(model, args, epoch):
     save_path = os.path.join(args.output_dir, args.model_name, 'model_epoch_{}.pt'.format(epoch))
@@ -169,7 +188,7 @@ def generate(model, test_iter, tokenizer, args):
     source_list = []
     
     with torch.no_grad():
-        for inputs in tqdm(test_iter):
+        for idx, inputs in tqdm(enumerate(test_iter)):
             target = inputs['input_ids']
             if args.dataset_type == 'wp':
                 source = inputs['condition']
@@ -179,7 +198,23 @@ def generate(model, test_iter, tokenizer, args):
             input_ids = target[:, 0].unsqueeze(1)
             model_kwargs = {}
             if args.dataset_type == 'wp':
-                prior_latent, encoder_outputs = model.get_prior(batch_size, device, condition=inputs['condition'], condition_mask=inputs['condition_mask'])
+                if args.visualize_prior:
+                    latent_dir = os.path.join(args.latent_dir, args.model_name)
+                    if not os.path.exists(latent_dir):
+                        os.makedirs(latent_dir, exist_ok=True)
+                    prior_latent_list_batch = []
+                    for i in range(5000):
+                        prior_latent, encoder_outputs = model.get_prior(batch_size, device, condition=inputs['condition'], condition_mask=inputs['condition_mask'])
+                        prior_latent_list_batch.append(torch.flatten(torch.stack(prior_latent).permute(1, 0, 2), start_dim=1, end_dim=-1).cpu().split(1, 0))
+                    for i in range(prior_latent[0].shape[0]):
+                        single_list = []
+                        for j in range(5000):
+                            single_list.append(prior_latent_list_batch[j][i].squeeze(0).numpy())
+                        single_df = pd.DataFrame(single_list)
+                        single_df.to_csv(latent_dir + '/' + str(idx * prior_latent[0].shape[0] + i) + '.csv', header=None, index=None)
+                    continue
+                else:
+                    prior_latent, encoder_outputs = model.get_prior(batch_size, device, condition=inputs['condition'], condition_mask=inputs['condition_mask'])
                 model_kwargs['attention_mask'] = inputs['condition_mask']
                 model_kwargs['encoder_outputs'] = encoder_outputs
                 input_ids = inputs['condition']

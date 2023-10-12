@@ -214,8 +214,8 @@ class BartAttention(nn.Module):
         ), f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`: {num_heads})."
         self.scaling = self.head_dim ** -0.5
         self.is_decoder = is_decoder
-        if is_decoder and is_self:
-            self.lmf_layer = LMFLayer(embed_dim, latent_size, rank)
+        # if is_decoder and is_self:
+        #     self.lmf_layer = LMFLayer(embed_dim, latent_size, rank)
 
         self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
@@ -257,20 +257,20 @@ class BartAttention(nn.Module):
             # reuse k, v, self_attention
             key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
             value_states = self.v_proj(hidden_states)
-            if latent is not None:
-                value_states = self._shape(self.lmf_layer(value_states, latent), -1, bsz)
-            else:
-                value_states = self._shape(value_states, -1, bsz)
+            # if latent is not None:
+            #     value_states = self._shape(self.lmf_layer(value_states, latent), -1, bsz)
+            # else:
+            value_states = self._shape(value_states, -1, bsz)
             key_states = torch.cat([past_key_value[0], key_states], dim=2)
             value_states = torch.cat([past_key_value[1], value_states], dim=2)
         else:
             # self_attention
             key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
             value_states = self.v_proj(hidden_states)
-            if latent is not None:
-                value_states = self._shape(self.lmf_layer(value_states, latent), -1, bsz)
-            else:
-                value_states = self._shape(value_states, -1, bsz)
+            # if latent is not None:
+            #     value_states = self._shape(self.lmf_layer(value_states, latent), -1, bsz)
+            # else:
+            value_states = self._shape(value_states, -1, bsz)
 
         if self.is_decoder:
             # if cross_attention save Tuple(torch.Tensor, torch.Tensor) of all cross attention key/value_states.
@@ -1731,7 +1731,7 @@ class BartVAEEncoder(BartPretrainedModel):
                 balanced_kl, kl_coeffs, kl_vals = utils.kl_balancer(kl_all_list, kl_coeff, kl_balance=False,
                                                                     alpha_i=alpha_i)
                 kl_loss = torch.sum(balanced_kl)
-                log_prior = torch.stack(all_log_prior).mean(0)
+                log_prior = -torch.stack(all_neg_log_p).mean(0)
                 log_post = torch.stack(all_log_post).mean(0)
 
                 mu = torch.cat(all_post_mu, dim=-1)
@@ -1792,6 +1792,7 @@ class BartVAEDecoderWithLMHead(BartPretrainedModel):
         )
         self.layers = nn.ModuleList([BartDecoderLayer(config) for _ in range(config.decoder_layers)])
         self.layernorm_embedding = nn.LayerNorm(config.d_model)
+        self.latent_transform_mem = nn.ModuleList([nn.Linear(config.latent_size, config.d_model) for _ in range(config.decoder_layers)])
 
         self.init_weights()
         self.gradient_checkpointing = False
@@ -1958,9 +1959,18 @@ class BartVAEDecoderWithLMHead(BartPretrainedModel):
 
         # past_key_values_length
         past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
-
+        
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids) * self.embed_scale
+
+        if past_key_values_length == 0:
+            inputs_embeds = torch.cat((torch.ones(inputs_embeds.shape[0], inputs_embeds.shape[-1],
+                                                  device=inputs_embeds.device).unsqueeze(1), inputs_embeds), dim=1)
+            input_shape = inputs_embeds.shape[:-1]
+            if attention_mask is not None:
+                attention_mask = torch.cat((torch.ones(attention_mask.shape[0], 1,
+                                                               device=attention_mask.device),
+                                                    attention_mask), dim=1)
 
         attention_mask = self._prepare_decoder_attention_mask(
             attention_mask, input_shape, inputs_embeds, past_key_values_length
@@ -1969,6 +1979,11 @@ class BartVAEDecoderWithLMHead(BartPretrainedModel):
         # expand encoder attention mask
         if encoder_hidden_states is not None and encoder_attention_mask is not None:
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
+            drop = torch.randn(encoder_attention_mask.shape[0], encoder_attention_mask.shape[1],
+                               device=encoder_attention_mask.device) < 0.5
+            encoder_attention_mask = drop.byte().masked_fill(~encoder_attention_mask.bool(), 0)
+            encoder_attention_mask = torch.cat((torch.ones(encoder_attention_mask.shape[0], 1,
+                                                           device=encoder_attention_mask.device), encoder_attention_mask), dim=1)
             encoder_attention_mask = _expand_mask(encoder_attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1])
 
         # embed positions
@@ -2047,11 +2062,12 @@ class BartVAEDecoderWithLMHead(BartPretrainedModel):
                     None,
                 )
             else:
+                ll = self.latent_transform_mem[idx](latent).unsqueeze(1)
 
                 layer_outputs = decoder_layer(
-                    hidden_states,
+                    torch.cat((ll, hidden_states[:, 1:, :]), dim=1) if past_key_values_length == 0 else hidden_states,
                     attention_mask=attention_mask,
-                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_hidden_states=torch.cat((ll, encoder_hidden_states), dim=1),
                     encoder_attention_mask=encoder_attention_mask,
                     layer_head_mask=(head_mask[idx] if head_mask is not None else None),
                     cross_attn_layer_head_mask=(
@@ -2081,6 +2097,10 @@ class BartVAEDecoderWithLMHead(BartPretrainedModel):
             all_hidden_states += (hidden_states,)
 
         next_cache = next_decoder_cache if use_cache else None
+        
+        if past_key_values_length == 0:
+            hidden_states = hidden_states[:, 1:, :]
+
 
         if self.model_parallel:
             torch.cuda.set_device(self.first_device)
@@ -2201,9 +2221,12 @@ class BartDella(BartPretrainedModel):
         ce_loss = self.loss_fn_reduced(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
         return ce_loss
 
-    def get_celoss(self, input_ids, attention_mask, latent):
+    def get_celoss(self, input_ids, attention_mask, latent, condition_output, condition_mask):
         batch_size = input_ids.size(0)
-        decoder_outputs = self.decoder(input_ids, attention_mask=attention_mask, all_latent=latent)
+        decoder_outputs = self.decoder(input_ids, attention_mask=attention_mask, all_latent=latent,
+                                       output_hidden_states=True,
+                                       encoder_hidden_states=condition_output[0], encoder_attention_mask=condition_mask
+                                       )
         lm_logits = decoder_outputs.logits
 
         shift_logits = lm_logits[..., :-1, :].contiguous()
@@ -2213,8 +2236,14 @@ class BartDella(BartPretrainedModel):
         ce_loss = ce_loss.view(batch_size, -1).sum(-1)
         return ce_loss
 
-    def get_klloss(self, input_ids, attention_mask):
-        encoder_outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+    def get_klloss(self, input_ids, labels=None, attention_mask=None, condition=None, condition_mask=None):
+        if condition is not None:
+            condition_output = self.encoder(condition, attention_mask=condition_mask, compute_kl=False)
+            condition = condition_output.hidden_states
+        else:
+            condition = None
+
+        encoder_outputs = self.encoder(input_ids, attention_mask=attention_mask, condition_hidden_states=condition)
         return encoder_outputs.kl_loss
 
     def get_neg_entropy(self, input_ids, attention_mask, ns=30):
@@ -2234,13 +2263,20 @@ class BartDella(BartPretrainedModel):
         latent = torch.cat(latent, dim=-1)
         return neg_entropy, latent
 
-    def iw_sample(self, input_ids, attention_mask):
-        encoder_outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+    def iw_sample(self, input_ids, labels=None, attention_mask=None, condition=None, condition_mask=None):
+        if condition is not None:
+            condition_output = self.encoder(condition, attention_mask=condition_mask, compute_kl=False)
+            condition = condition_output.hidden_states
+        else:
+            condition = None
+
+        encoder_outputs = self.encoder(input_ids, attention_mask=attention_mask, condition_hidden_states=condition)
         latent = encoder_outputs.latent
         log_prior = encoder_outputs.log_prior
         log_post = encoder_outputs.log_post
-        log_gen = -self.get_celoss(input_ids=input_ids, attention_mask=attention_mask, latent=latent)
-        log_likelihood = log_gen + log_prior - log_post
+        log_gen = -self.get_celoss(input_ids=input_ids, attention_mask=attention_mask, latent=latent,
+                                   condition_output=condition_output, condition_mask=condition_mask)
+        log_likelihood = log_gen + log_prior.sum(-1) - log_post.sum(-1)
         return log_gen, log_likelihood
 
     def get_prior(self, batch_size, device, condition=None, condition_mask=None):
@@ -2272,6 +2308,9 @@ class BartDella(BartPretrainedModel):
         ce_loss = self.loss_fn(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
         ce_loss = ce_loss.view(batch_size, -1).sum(-1)
         ce_loss = ce_loss.mean()
+        a = ce_loss / attention_mask.sum(dim=-1)
+        ppl = math.exp(min(a.mean(), 100))
+
 
         seq_len = input_ids.size(-1)
         if bow_logits is not None:
@@ -2279,9 +2318,9 @@ class BartDella(BartPretrainedModel):
             bow_loss = self.loss_fn(bow_logits.view(-1, bow_logits.size(-1)), shift_labels.view(-1))
             bow_loss = bow_loss.view(batch_size, -1).sum(-1)
             bow_loss = bow_loss.mean()
-            return ce_loss, kl_loss, bow_loss, encoder_output, decoder_output
+            return ce_loss, kl_loss, bow_loss, encoder_output, decoder_output, ppl
         else:
-            return ce_loss, kl_loss, encoder_output, decoder_output
+            return ce_loss, kl_loss, encoder_output, decoder_output, ppl
 
     def forward(
             self,

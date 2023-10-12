@@ -1,3 +1,7 @@
 checkpoints/*
 data/*
 generation_output/*
+latest_code/*
+old_code/*
+visualization/*
+tensorboard/*
