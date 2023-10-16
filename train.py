@@ -7,6 +7,7 @@ from tqdm import tqdm
 from train_utils import *
 from tensorboardX import SummaryWriter
 import pandas as pd
+import time
 logger = logging.getLogger(__name__)
 
 def prepare_for_training(args, model, train_iter):
@@ -186,6 +187,7 @@ def generate(model, test_iter, tokenizer, args):
     output_list = []
     target_list = []
     source_list = []
+    inference_speed = []
     
     with torch.no_grad():
         for idx, inputs in tqdm(enumerate(test_iter)):
@@ -197,6 +199,7 @@ def generate(model, test_iter, tokenizer, args):
             device = target.device
             input_ids = target[:, 0].unsqueeze(1)
             model_kwargs = {}
+            start_time = time.time()
             if args.dataset_type == 'wp':
                 if args.visualize_prior:
                     latent_dir = os.path.join(args.latent_dir, args.model_name)
@@ -274,13 +277,17 @@ def generate(model, test_iter, tokenizer, args):
                     **model_kwargs,
                 )
             ans = ans.cpu().numpy()
+            end_time = time.time()
+            
 
             if args.dataset_type == 'wp':
                 target = target.cpu().numpy()
                 source = source.cpu().numpy()
+            length = 0
             for i in range(len(ans)):
                 text_ans = tokenizer.decode(ans[i], clean_up_tokenization_spaces=False)
                 text_ans = filter_sen(text_ans)
+                length = length + len(text_ans.split())
                 if len(text_ans) > 0:
                     output_list.append(text_ans)
                     if args.dataset_type in 'wp':
@@ -292,10 +299,14 @@ def generate(model, test_iter, tokenizer, args):
                         source_list.append(source_text)
                 else:
                     print('meet zero')
+            inference_speed.append(length / (end_time - start_time))
+            
 
     save_dir = os.path.join(args.generation_output_dir, args.model_name)
     file_name = '{}_output_{}_epoch_{}_outputs.txt'.format(has_condition, generate_param, args.load_epoch)
     logging.info('generation output save at {}'.format(save_dir))
+    print('='*10 + '\n')
+    print("Inference Speed: {}".format(sum(inference_speed) / len(inference_speed)))
     if not os.path.exists(save_dir):
         os.makedirs(save_dir, exist_ok=True)
     with open(os.path.join(save_dir, file_name), 'w') as f:
