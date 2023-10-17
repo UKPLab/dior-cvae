@@ -1,16 +1,19 @@
 # Dior-CVAE: Pre-trained Language Models and Diffusion Priors for Variational Dialog Generation
 
-This is the official code for the paper [Dior-CVAE: Pre-trained Language Models and Diffusion Priors for Variational Dialog Generation](https://arxiv.org/abs/2305.15025.pdf) by Tianyu Yang, Thy Thy Tran, Iryna Gurevych
+This is the official code for the EMNLP Findings paper [Dior-CVAE: Pre-trained Language Models and Diffusion Priors for Variational Dialog Generation](https://arxiv.org/abs/2305.15025.pdf) by Tianyu Yang, Thy Thy Tran, Iryna Gurevych
 
 Please use the following citation:
 
 ```
-@InProceedings{yang:2023:EMNLP,
+@inproceedings{yang-etal-2023-dior-cvae,
   title     = {Dior-CVAE: Pre-trained Language Models and Diffusion Priors for Variational Dialog Generation},
   author    = {Yang, Tianyu and Tran, Thy Thy and Gurevych, Iryna},
-  journal   = {arXiv preprint arXiv:2305.15025},
-  year={2023}
+  booktitle = "Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing",
+  year = "2023",
+  publisher = "Association for Computational Linguistics",
+  url = "https://aclanthology.org/",
 }
+
 ```
 
 > **Abstract:**
