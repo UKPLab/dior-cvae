@@ -17,7 +17,7 @@ Please use the following citation:
 We employ a diffusion model to increase the complexity of the prior distribution and its compatibility to the distributions produced by a PLM. Also, we propose memory dropout to the cross-attention mechanism, which actively encourages the use of latent variables for response generation. Overall, experiments across two commonly-used open-domain dialog datasets show that our method can generate more diverse responses without large-scale dialog pre-training.
 
 
-Contact person: Tianyu Yang,  yang@ukp.informatik.tu-darmstadt.de
+Contact person: Tianyu Yang,  yang@ukp.tu-darmstadt.de
 
 https://www.ukp.tu-darmstadt.de/
 
