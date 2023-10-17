@@ -31,6 +31,7 @@ Don't hesitate to send us an e-mail or report an issue, if something is broken (
 ## Project structure
 
 * `data/` -- this folder is used to contain all the needed data.
+* `generation_output/` -- this folder is used to contain the generation results.
 * `tensorboard/` -- this folder is used to contain the tensorboard record.
 * `preprocess/` -- this folder contains the code for preprocessing the data.
 * `improved_diffusion/` -- this folder contains the code the diffusion model.
